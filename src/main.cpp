@@ -22,10 +22,11 @@
 #endif
 
 
-//Aws
-#define AWS_IOT_PUBLISH_TOPIC   "AQMG_5"
-#define AWS_IOT_SUBSCRIBE_TOPIC "esp32/control"
-#define AWS_IOT_STATUS_TOPIC    "airbuddi/status"
+// ===================== AWS IoT =====================
+
+String AWS_IOT_PUBLISH_TOPIC;
+String AWS_IOT_SUBSCRIBE_TOPIC;
+String AWS_IOT_STATUS_TOPIC;
 
 String mac = "";
 int connectedFlag = 0;
@@ -242,6 +243,19 @@ void setup() {
 
     Serial.print("Device MAC: ");
     Serial.println(mac);
+
+  AWS_IOT_PUBLISH_TOPIC = "airbuddi/device/" + mac + "/telemetry";
+  AWS_IOT_SUBSCRIBE_TOPIC = "airbuddi/device/" + mac + "/control";
+  AWS_IOT_STATUS_TOPIC = "airbuddi/device/" + mac + "/status";
+
+  Serial.print("Device ID: ");
+  Serial.println(mac);
+
+  Serial.print("Telemetry topic: ");
+  Serial.println(AWS_IOT_PUBLISH_TOPIC);
+
+  Serial.print("Control topic: ");
+  Serial.println(AWS_IOT_SUBSCRIBE_TOPIC);
 
   //******************************************************************************-PIN DEFINITIONS-*****************************************************************************************
   pinMode(speed1, OUTPUT);                 //FAN PIN SET AS AN OUTPUT
@@ -1391,13 +1405,13 @@ bool connectAWS()
         Serial.print("AWS connect attempt ");
         Serial.println(attempt);
 
-        if (client.connect(THINGNAME))
+        if (client.connect(mac.c_str()))
         {
             Serial.println("AWS IoT Connected!");
             publishStatus();
 
             // Subscribe again after every reconnect
-            if (client.subscribe(AWS_IOT_SUBSCRIBE_TOPIC))
+            if (client.subscribe(AWS_IOT_SUBSCRIBE_TOPIC.c_str()))
                 Serial.println("AWS IoT subscribe OK");
             else
                 Serial.println("AWS IoT subscribe failed");
@@ -1421,7 +1435,7 @@ bool connectAWS()
 void publishMessage() {
   
   JsonDocument doc;
-  doc["NAME"] = "MONITOR 3"; 
+  doc["NAME"] = "Airbuddi Max";
   doc["id"] = mac;
   doc["IAQ"] = IAQ;
   doc["Humidity"] = Humidity;
@@ -1444,7 +1458,7 @@ void publishMessage() {
   // Avoid calling client.connected() / client.state() here — those
   // PubSubClient calls trigger internal disconnect detection and can
   // tear down the TCP socket if the broker sent a FIN between packets.
-  bool ok = client.publish(AWS_IOT_PUBLISH_TOPIC, jsonBuffer);
+  bool ok = client.publish(AWS_IOT_PUBLISH_TOPIC.c_str(), jsonBuffer);
 
   if (ok) {
     Serial.println("Published to AWS IoT OK");
@@ -1555,9 +1569,6 @@ void publishStatus()
     // Device identity
     doc["deviceId"] = mac;
 
-    // Connection status
-    doc["status"] = "online";
-
     // Power
     doc["power"] = (p == 7);
 
@@ -1612,8 +1623,8 @@ void publishStatus()
     }
 
     if (client.publish(
-        AWS_IOT_STATUS_TOPIC,
-        jsonBuffer
+    AWS_IOT_STATUS_TOPIC.c_str(),
+    jsonBuffer
     ))
     {
         Serial.println("===== STATUS PUBLISHED =====");
@@ -1729,14 +1740,31 @@ void WifiManagerTask(void *pvParameters) {
 
 
 
-String getDefaultMacAddress() {
-  unsigned char mac_base[6] = {0};
-  if (esp_efuse_mac_get_default(mac_base) == ESP_OK) {
-    char buffer[18];  // 6*2 characters for hex + 5 characters for colons + 1 character for null terminator
-    sprintf(buffer, "%02X:%02X:%02X:%02X:%02X:%02X", mac_base[0], mac_base[1], mac_base[2], mac_base[3], mac_base[4], mac_base[5]);
-    mac = buffer;
-  }
-  return mac;
+String getDefaultMacAddress()
+{
+    uint8_t mac_base[6] = {0};
+
+    if (esp_efuse_mac_get_default(mac_base) != ESP_OK)
+    {
+        return "";
+    }
+
+    String mac = "";
+
+    for (int i = 0; i < 6; i++)
+    {
+        if (i > 0)
+            mac += ":";
+
+        if (mac_base[i] < 0x10)
+            mac += "0";
+
+        mac += String(mac_base[i], HEX);
+    }
+
+    mac.toUpperCase();
+
+    return mac;
 }
 
 void printAwsNetworkDiagnostics()
