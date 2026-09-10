@@ -1136,6 +1136,17 @@ void messageHandler(char* topic, byte* payload, unsigned int length)
         case 2:
             // POWER OFF
             p = 5;
+            mine=2;
+            mod=0;
+            text=0;
+            powerState = false;
+            lowerChamberState = false;
+            upperChamberState = false;
+            autoMode = false;
+            sleepMode = false;
+            uvState = false;
+            fanSpeed = 0;
+            reset();
 
             dwin.write(R, 10);
             dwin.write(M, 8);
