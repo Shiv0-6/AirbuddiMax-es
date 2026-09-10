@@ -21,6 +21,10 @@
 #define LED_BUILTIN 2
 #endif
 
+//ota
+TaskHandle_t otaTaskHandle = NULL;
+bool otaEnabled = false;
+void OTATask(void *parameter);
 
 // ===================== AWS IoT =====================
 
@@ -184,7 +188,7 @@ unsigned char d[7] = {
 };
 unsigned char e[7] = {
   0X5A, 0XA5, 0X07, 0X82, 0X24, 0X00, 0X00  //Serial output prefix for IAQ
-};
+}; 
 unsigned char f[7] = {
   0X5A, 0XA5, 0X07, 0X82, 0X25, 0X00, 0X00  //Serial output prefix for CO2
 };
@@ -1093,6 +1097,36 @@ void messageHandler(char* topic, byte* payload, unsigned int length)
     Serial.println(message);
 
     // =====================================================
+// OTA COMMAND
+// =====================================================
+
+if (message == "ota")
+{
+    Serial.println("OTA command received");
+
+    if (!otaEnabled)
+    {
+        xTaskCreate(
+            OTATask,
+            "OTA Task",
+            4096,
+            NULL,
+            1,
+            &otaTaskHandle
+        );
+
+        Serial.println("OTA task created");
+    }
+    else
+    {
+        Serial.println("OTA is already running");
+    }
+
+    Serial.println("=================================");
+    return;
+}
+
+    // =====================================================
     // CONVERT STRING COMMAND TO INTEGER
     // =====================================================
 
@@ -1335,6 +1369,7 @@ case 16:
     }
 
     mine = 2;
+    delay(200); // Small delay to ensure commands are processed
     dwin.write(Y, 8);
     Serial.println("Auto Mode OFF command received");
     break;    
@@ -1795,5 +1830,62 @@ void printAwsNetworkDiagnostics()
     else
     {
         Serial.println("DNS failed for AWS IoT endpoint.");
+    }
+}  
+
+void OTATask(void *parameter)
+{
+    Serial.println("===== OTA TASK STARTED =====");
+
+    ArduinoOTA.setHostname("AirBuddi");
+
+    ArduinoOTA.onStart([]() {
+        Serial.println("OTA Update Started");
+    });
+
+    ArduinoOTA.onEnd([]() {
+        Serial.println("\nOTA Update Finished");
+    });
+
+    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+        Serial.printf(
+            "OTA Progress: %u%%\r",
+            (progress * 100) / total
+        );
+    });
+
+    ArduinoOTA.onError([](ota_error_t error) {
+
+        Serial.printf("OTA Error[%u]: ", error);
+
+        if (error == OTA_AUTH_ERROR)
+            Serial.println("Auth Failed");
+
+        else if (error == OTA_BEGIN_ERROR)
+            Serial.println("Begin Failed");
+
+        else if (error == OTA_CONNECT_ERROR)
+            Serial.println("Connect Failed");
+
+        else if (error == OTA_RECEIVE_ERROR)
+            Serial.println("Receive Failed");
+
+        else if (error == OTA_END_ERROR)
+            Serial.println("End Failed");
+    });
+
+    ArduinoOTA.begin();
+
+    otaEnabled = true;
+
+    Serial.println("OTA Ready");
+    Serial.print("OTA IP: ");
+    Serial.println(WiFi.localIP());
+
+    while (true)
+    {
+        ArduinoOTA.handle();
+
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
