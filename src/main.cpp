@@ -122,6 +122,34 @@ int text = 0;
 int mine = 5;
 
 
+#define DWIN_MAC_VP 0x3200
+
+void sendMacToDwin()
+{
+    // MAC format: AA:BB:CC:DD:EE:FF = 17 characters
+    const uint8_t macLength = 17;
+
+    dwin.write((uint8_t)0x5A);
+    dwin.write((uint8_t)0xA5);
+
+    // Length = command(1) + VP(2) + data(17)
+    dwin.write((uint8_t)(1 + 2 + macLength));
+
+    // Write command
+    dwin.write((uint8_t)0x82);
+
+    // VP = 0x3200
+    dwin.write((uint8_t)0x32);
+    dwin.write((uint8_t)0x00);
+
+    // Write MAC as ASCII
+    for (uint8_t i = 0; i < macLength; i++)
+    {
+        dwin.write((uint8_t)mac[i]);
+    }
+}
+
+
 // =====================================================
 // DEVICE STATUS / STATE
 // =====================================================
@@ -436,6 +464,8 @@ void displayTask(void *pvParameters) {
     dwin.write(j);
     dwin.write(i & 0x0000FF);
     dwin.write(g & 0x0000FF);
+
+    sendMacToDwin();
 
     vTaskDelay(1000 / portTICK_PERIOD_MS);
   }
