@@ -15,16 +15,28 @@
 #include <Preferences.h>
 #include <time.h>
 #include <ArduinoOTA.h>
+#include <HTTPClient.h>
+#include <Update.h>
+
+
+// =====================================================
+// FIRMWARE INFORMATION
+// =====================================================
+
+#define DEVICE_MODEL "AIRBUDDI_MAX"
+#define FIRMWARE_VERSION "1.0.0"
 
 
 #ifndef LED_BUILTIN
 #define LED_BUILTIN 2
 #endif
 
-//ota
-TaskHandle_t otaTaskHandle = NULL;
-bool otaEnabled = false;
-void OTATask(void *parameter);
+// =====================================================
+// HTTPS OTA
+// =====================================================
+bool otaInProgress = false;
+void performOTA(String firmwareUrl, String newVersion);
+
 
 // ===================== AWS IoT =====================
 
@@ -126,26 +138,23 @@ int mine = 5;
 
 void sendMacToDwin()
 {
-    // MAC format: AA:BB:CC:DD:EE:FF = 17 characters
-    const uint8_t macLength = 17;
+    const char *macText = mac.c_str();
 
     dwin.write((uint8_t)0x5A);
     dwin.write((uint8_t)0xA5);
 
-    // Length = command(1) + VP(2) + data(17)
-    dwin.write((uint8_t)(1 + 2 + macLength));
-
-    // Write command
+    // 0x82 + VP(2) + 17 ASCII bytes = 20 bytes = 0x14
+    dwin.write((uint8_t)0x14);
     dwin.write((uint8_t)0x82);
 
-    // VP = 0x3200
+    // VP 0x3200
     dwin.write((uint8_t)0x32);
     dwin.write((uint8_t)0x00);
 
-    // Write MAC as ASCII
-    for (uint8_t i = 0; i < macLength; i++)
+    // ASCII MAC
+    for (int i = 0; i < 17; i++)
     {
-        dwin.write((uint8_t)mac[i]);
+        dwin.write((uint8_t)macText[i]);
     }
 }
 
@@ -169,6 +178,7 @@ bool lowerChamberState = false;
 
 bool sleepMode = false;
 bool autoMode = false;
+bool sleepStatusChange = false;
 
 //VARIABLES FOR RGB LED
 int mynumb;
@@ -259,7 +269,6 @@ TaskHandle_t SoilMoisture_1_Handle;  //TASK HANDLE FOR SOIL MOISTURE SENSOR 2
 TaskHandle_t SoilMoisture_2_Handle;  //TASK HANDLE FOR SOIL MOISTURE SENSOR 2
 TaskHandle_t AWSTaskHandle = NULL;
 TaskHandle_t WifiManagerTaskHandle = NULL;
-TaskHandle_t OTATaskHandle = NULL;
 TaskHandle_t builtinLedTaskHandle = NULL;
 
 volatile bool builtinLedRunning = true;
@@ -319,7 +328,6 @@ void setup() {
   xTaskCreate(WifiManagerTask, "WifiManager Task", 4096, NULL, 1, &WifiManagerTaskHandle);  
   xTaskCreate(bmeTask, "BME Task", 8192, NULL, 1, &bmeTaskHandle);                      //TASK CREATED FOR BME
   xTaskCreate(hpmaTask, "HPMA Task", 8192, NULL, 1, &hpmaTaskHandle);                   //TASK CREATED FOR HPMA
-  //xTaskCreate(OTATask, "OTA Task", 4096, NULL, 2, &OTATaskHandle);  //TASK CREATED FOR DWIN DISPLAY CONTROL(AVAPSC)
 }
 //XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX-END-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 void loop() {}
@@ -1127,291 +1135,64 @@ void messageHandler(char* topic, byte* payload, unsigned int length)
     Serial.println(message);
 
     // =====================================================
-// OTA COMMAND
-// =====================================================
+    // HTTPS OTA COMMAND
+      // =====================================================
 
-if (message == "ota")
-{
-    Serial.println("OTA command received");
-
-    if (!otaEnabled)
+    if (message == "firmware_update")
     {
-        xTaskCreate(
-            OTATask,
-            "OTA Task",
-            4096,
-            NULL,
-            1,
-            &otaTaskHandle
-        );
+    String firmwareUrl = doc["url"] | "";
+    String newVersion = doc["version"] | "";
+    String targetModel = doc["model"] | "";
 
-        Serial.println("OTA task created");
-    }
-    else
+    firmwareUrl.trim();
+    newVersion.trim();
+    targetModel.trim();
+
+    Serial.println("===== FIRMWARE UPDATE REQUEST =====");
+    Serial.print("Target Model: ");
+    Serial.println(targetModel);
+    Serial.print("Current Model: ");
+    Serial.println(DEVICE_MODEL);
+    Serial.print("Current Version: ");
+    Serial.println(FIRMWARE_VERSION);
+    Serial.print("New Version: ");
+    Serial.println(newVersion);
+    Serial.print("Firmware URL: ");
+    Serial.println(firmwareUrl);
+
+    // Check model
+    if (targetModel != DEVICE_MODEL)
     {
-        Serial.println("OTA is already running");
+        Serial.println("OTA REJECTED: Firmware model mismatch.");
+        Serial.println("==================================");
+        return;
     }
 
-    Serial.println("=================================");
+    // Check required information
+    if (firmwareUrl.length() == 0 || newVersion.length() == 0)
+    {
+        Serial.println("OTA REJECTED: Missing URL or version.");
+        Serial.println("==================================");
+        return;
+    }
+
+    // Prevent multiple OTA operations
+    if (otaInProgress)
+    {
+        Serial.println("OTA already in progress.");
+        Serial.println("==================================");
+        return;
+    }
+
+    otaInProgress = true;
+
+    // Perform OTA
+    performOTA(firmwareUrl, newVersion);
+
+    otaInProgress = false;
+
+    Serial.println("==================================");
     return;
-}
-
-    // =====================================================
-    // CONVERT STRING COMMAND TO INTEGER
-    // =====================================================
-
-    int command = 0;
-
-    if (message == "power_on")       command = 1;
-    else if (message == "power_off")       command = 2;
-    else if (message == "lower_on")     command = 3;
-    else if (message == "lower_off")    command = 4;
-    else if (message == "upper_on")     command = 5;
-    else if (message == "upper_off")    command = 6;
-    else if (message == "uvc_on")     command = 7;
-    else if (message == "uvc_off")    command = 8;
-    else if (message == "fan_1")   command = 9;
-    else if (message == "fan_2")   command = 10;
-    else if (message == "fan_3")   command = 11;
-    else if (message == "fan_off") command = 12;
-    else if (message == "sleep_on")  command = 13;
-    else if (message == "sleep_off") command = 14;
-    else if (message == "auto_on")   command = 15;
-    else if (message == "auto_off")  command = 16;
-
-    // =====================================================
-    // SWITCH CASE
-    // =====================================================
-
-    switch (command)
-    {
-        case 1:
-            // POWER ON
-            p = 7;
-
-            dwin.write(S, 10);
-            dwin.write(L, 8);
-            Serial.println("Power ON command received");
-            Serial.print("p = ");
-            Serial.println(p);
-            break;
-
-
-        case 2:
-            // POWER OFF
-            p = 5;
-            mine=2;
-            mod=0;
-            text=0;
-            powerState = false;
-            lowerChamberState = false;
-            upperChamberState = false;
-            autoMode = false;
-            sleepMode = false;
-            uvState = false;
-            fanSpeed = 0;
-            reset();
-
-            dwin.write(R, 10);
-            dwin.write(M, 8);
-            Serial.println("Power OFF command received");
-            Serial.print("p = ");
-            Serial.println(p);
-            break;
-
-
-        case 3:
-            // LOWER CHAMBER ON
-            dwin.write(G, 8);
-            digitalWrite(LOWER_CHAMBER_PIN, HIGH);
-
-            Serial.println("Lower chamber ON command received");
-            break;
-
-
-        case 4:
-            // LOWER CHAMBER OFF
-            dwin.write(H, 8);
-            digitalWrite(LOWER_CHAMBER_PIN, LOW);
-
-            Serial.println("Lower chamber OFF command received");
-            break;
-
-
-        case 5:
-            // UPPER CHAMBER ON
-            dwin.write(E, 8);
-            digitalWrite(UPPER_CHAMBER_PIN, HIGH);
-
-            Serial.println("Upper chamber ON command received");
-            break;
-
-
-        case 6:
-            // UPPER CHAMBER OFF
-            dwin.write(F, 8);
-            digitalWrite(UPPER_CHAMBER_PIN, LOW);
-
-            Serial.println("Upper chamber OFF command received");
-            break;
-
-
-        case 7:
-            // UV ON
-            dwin.write(A, 8);
-            digitalWrite(UV_PROTECTION, HIGH);
-
-            Serial.println("UV Protection ON command received");
-            break;
-
-
-        case 8:
-            // UV OFF
-            dwin.write(B, 8);
-            digitalWrite(UV_PROTECTION, LOW);
-
-            Serial.println("UV Protection OFF command received");
-            break;
-
-
-        case 9:
-            // FAN SPEED 1
-            dwin.write(I, 8);
-            digitalWrite(speed1, LOW);
-            digitalWrite(speed2, HIGH);
-            digitalWrite(speed3, LOW);
-
-            Serial.println("Fan Speed 1 command received");
-            break;
-
-
-        case 10:
-            // FAN SPEED 2
-            dwin.write(J, 8);
-            digitalWrite(speed1, HIGH);
-            digitalWrite(speed2, HIGH);
-            digitalWrite(speed3, LOW);
-
-            Serial.println("Fan Speed 2 command received");
-            break;
-
-
-        case 11:
-            // FAN SPEED 3
-            dwin.write(K, 8);
-            digitalWrite(speed1, LOW);
-            digitalWrite(speed2, LOW);
-            digitalWrite(speed3, HIGH);
-
-            Serial.println("Fan Speed 3 command received");
-            break;
-
-
-        case 12:
-            // FAN OFF
-            dwin.write(W, 8);
-            digitalWrite(speed1, LOW);
-            digitalWrite(speed2, LOW);
-            digitalWrite(speed3, LOW); 
-
-            Serial.println("Fan OFF command received");
-            break;
-
-
-        case 13:
-            // SLEEP MODE ON
-            p = 5;
-
-            dwin.write(T, 10); 
-            dwin.write(C, 8);
-            digitalWrite(speed1, LOW);
-            digitalWrite(speed2, HIGH);
-            digitalWrite(speed3, LOW);
-
-            digitalWrite(UPPER_CHAMBER_PIN, HIGH);
-            digitalWrite(LOWER_CHAMBER_PIN, LOW);
-
-            digitalWrite(UV_PROTECTION, LOW);
-
-            sl1 = 2;
-            sl2 = 2;
-
-            Serial.println("Sleep Mode ON command received");
-            break;
-
-
-        case 14:
-            // SLEEP MODE OFF
-            p = 7;
-
-            dwin.write(U, 10);
-            dwin.write(D, 8);
-            reset();
-
-            Serial.println("Sleep Mode OFF command received");
-            break;
-        
-        case 15:
-    // AUTO MODE ON
-    mine = 1;
-    dwin.write(X, 8);
-    Serial.println("Auto Mode ON command received");
-    break;
-
-
-case 16:
-    // AUTO MODE OFF
-    if (mod == 1) {
-        for (int i = 0; i < sizeof(K); i++) dwin.write(K[i]);
-        for (int i = 0; i < sizeof(A); i++) dwin.write(A[i]);
-        mod = 0;
-    }
-    else if (mod == 2) {
-        for (int i = 0; i < sizeof(J); i++) dwin.write(J[i]);
-        for (int i = 0; i < sizeof(A); i++) dwin.write(A[i]);
-        mod = 0;
-    }
-    else if (mod == 3) {
-        for (int i = 0; i < sizeof(I); i++) dwin.write(I[i]);
-        for (int i = 0; i < sizeof(B); i++) dwin.write(B[i]);
-        mod = 0;
-    }
-    else if (mod == 4) {
-        for (int i = 0; i < sizeof(W); i++) dwin.write(W[i]);
-        for (int i = 0; i < sizeof(B); i++) dwin.write(B[i]);
-        mod = 0;
-    }
-
-    if (text == 1) {
-        for (int i = 0; i < sizeof(E); i++) dwin.write(E[i]);
-        for (int i = 0; i < sizeof(G); i++) dwin.write(G[i]);
-        text = 0;
-    }
-    else if (text == 2) {
-        for (int i = 0; i < sizeof(E); i++) dwin.write(E[i]);
-        for (int i = 0; i < sizeof(H); i++) dwin.write(H[i]);
-        text = 0;
-    }
-    else if (text == 3) {
-        for (int i = 0; i < sizeof(F); i++) dwin.write(F[i]);
-        for (int i = 0; i < sizeof(H); i++) dwin.write(H[i]);
-        text = 0;
-    }
-
-    mine = 2;
-    delay(200); // Small delay to ensure commands are processed
-    dwin.write(Y, 8);
-    Serial.println("Auto Mode OFF command received");
-    break;    
-
-        default:
-            // UNKNOWN COMMAND
-            Serial.print("Unknown command received: ");
-            Serial.println(message);
-            break;
-    }
-
-    Serial.println("=================================");
 }
 
 const char* mqttStateMessage(int state)
@@ -1513,6 +1294,8 @@ void publishMessage() {
   JsonDocument doc;
   doc["NAME"] = "Airbuddi Max";
   doc["id"] = mac;
+  doc["model"] = DEVICE_MODEL;
+  doc["firmwareVersion"] = FIRMWARE_VERSION;
   doc["IAQ"] = IAQ;
   doc["Humidity"] = Humidity;
   doc["PM 2.5"] = PM25;
@@ -1624,6 +1407,7 @@ bool statusChanged()
 
     if (changed)
     {
+      sleepStatusChange = (currentSleepMode != lastSleepMode);
         lastPowerState = currentPower;
         lastAutoMode = currentAutoMode;
         lastSleepMode = currentSleepMode;
@@ -1646,11 +1430,15 @@ void publishStatus()
     doc["deviceId"] = mac;
 
     // Power
-    doc["power"] = (p == 7);
+    if (!sleepStatusChange)
+    {
+        doc["power"] = (p == 7);
+    } 
 
     // Operating modes
     doc["autoMode"] = (mine == 1);
     doc["sleepMode"] = (sl1 == 2 && sl2 == 2);
+
 
     // Fan speed
       bool s1 = digitalRead(speed1);
@@ -1711,6 +1499,9 @@ void publishStatus()
     {
         Serial.println("STATUS PUBLISH FAILED");
     }
+
+    // Reset sleep status change flag
+    sleepStatusChange = false;
 }
 
 void AWSTask(void *pvParameters)
@@ -1863,59 +1654,119 @@ void printAwsNetworkDiagnostics()
     }
 }  
 
-void OTATask(void *parameter)
+// =====================================================
+// HTTPS OTA FUNCTION
+// =====================================================
+
+void performOTA(String firmwareUrl, String newVersion)
 {
-    Serial.println("===== OTA TASK STARTED =====");
+    Serial.println();
+    Serial.println("====================================");
+    Serial.println("        AIRBUDDI HTTPS OTA");
+    Serial.println("====================================");
 
-    ArduinoOTA.setHostname("AirBuddi");
-
-    ArduinoOTA.onStart([]() {
-        Serial.println("OTA Update Started");
-    });
-
-    ArduinoOTA.onEnd([]() {
-        Serial.println("\nOTA Update Finished");
-    });
-
-    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-        Serial.printf(
-            "OTA Progress: %u%%\r",
-            (progress * 100) / total
-        );
-    });
-
-    ArduinoOTA.onError([](ota_error_t error) {
-
-        Serial.printf("OTA Error[%u]: ", error);
-
-        if (error == OTA_AUTH_ERROR)
-            Serial.println("Auth Failed");
-
-        else if (error == OTA_BEGIN_ERROR)
-            Serial.println("Begin Failed");
-
-        else if (error == OTA_CONNECT_ERROR)
-            Serial.println("Connect Failed");
-
-        else if (error == OTA_RECEIVE_ERROR)
-            Serial.println("Receive Failed");
-
-        else if (error == OTA_END_ERROR)
-            Serial.println("End Failed");
-    });
-
-    ArduinoOTA.begin();
-
-    otaEnabled = true;
-
-    Serial.println("OTA Ready");
-    Serial.print("OTA IP: ");
-    Serial.println(WiFi.localIP());
-
-    while (true)
+    if (WiFi.status() != WL_CONNECTED)
     {
-        ArduinoOTA.handle();
-
-        vTaskDelay(pdMS_TO_TICKS(10));
+        Serial.println("OTA FAILED: WiFi not connected.");
+        return;
     }
+
+    WiFiClientSecure otaClient;
+
+    // IMPORTANT:
+    // For the first development test only.
+    // We will replace this with proper certificate
+    // validation before production.
+    otaClient.setInsecure();
+
+    HTTPClient http;
+
+    Serial.println("Connecting to firmware server...");
+    Serial.println(firmwareUrl);
+
+    if (!http.begin(otaClient, firmwareUrl))
+    {
+        Serial.println("OTA FAILED: HTTP connection could not start.");
+        return;
+    }
+
+    int httpCode = http.GET();
+
+    Serial.print("HTTP response: ");
+    Serial.println(httpCode);
+
+    if (httpCode != HTTP_CODE_OK)
+    {
+        Serial.println("OTA FAILED: Firmware download failed.");
+        http.end();
+        return;
+    }
+
+    int contentLength = http.getSize();
+
+    Serial.print("Firmware size: ");
+    Serial.print(contentLength);
+    Serial.println(" bytes");
+
+    if (contentLength <= 0)
+    {
+        Serial.println("OTA FAILED: Invalid firmware size.");
+        http.end();
+        return;
+    }
+
+    if (!Update.begin(contentLength))
+    {
+        Serial.print("OTA FAILED: Update.begin() failed. Error: ");
+        Serial.println(Update.errorString());
+        http.end();
+        return;
+    }
+
+    Serial.println("Starting firmware update...");
+
+    WiFiClient *stream = http.getStreamPtr();
+
+    size_t written = Update.writeStream(*stream);
+
+    Serial.print("Bytes written: ");
+    Serial.print(written);
+    Serial.print(" / ");
+    Serial.println(contentLength);
+
+    if (written != (size_t)contentLength)
+    {
+        Serial.println("OTA FAILED: Firmware write incomplete.");
+        Update.abort();
+        http.end();
+        return;
+    }
+
+    if (!Update.end())
+    {
+        Serial.print("OTA FAILED: Update.end() failed. Error: ");
+        Serial.println(Update.errorString());
+        http.end();
+        return;
+    }
+
+    if (!Update.isFinished())
+    {
+        Serial.println("OTA FAILED: Update not finished.");
+        http.end();
+        return;
+    }
+
+    Serial.println("====================================");
+    Serial.println("OTA UPDATE SUCCESSFUL");
+    Serial.print("New firmware version: ");
+    Serial.println(newVersion);
+    Serial.println("Restarting ESP32...");
+    Serial.println("====================================");
+
+    http.end();
+
+    delay(1000);
+
+    ESP.restart();
 }
