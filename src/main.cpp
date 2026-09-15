@@ -14,7 +14,6 @@
 #include "esp_mac.h"
 #include <Preferences.h>
 #include <time.h>
-#include <ArduinoOTA.h>
 #include <HTTPClient.h>
 #include <Update.h>
 
@@ -35,7 +34,7 @@
 // HTTPS OTA
 // =====================================================
 bool otaInProgress = false;
-void performOTA(String firmwareUrl, String newVersion);
+void performOTA(String firmwareUrl);
 
 
 // ===================== AWS IoT =====================
@@ -1134,49 +1133,28 @@ void messageHandler(char* topic, byte* payload, unsigned int length)
     Serial.print("Command: ");
     Serial.println(message);
 
-    // =====================================================
-    // HTTPS OTA COMMAND
-      // =====================================================
 
-    if (message == "firmware_update")
-    {
+
+// =====================================================
+// HTTPS OTA COMMAND
+// =====================================================
+if (message == "firmware_update")
+{
     String firmwareUrl = doc["url"] | "";
-    String newVersion = doc["version"] | "";
-    String targetModel = doc["model"] | "";
 
     firmwareUrl.trim();
-    newVersion.trim();
-    targetModel.trim();
 
     Serial.println("===== FIRMWARE UPDATE REQUEST =====");
-    Serial.print("Target Model: ");
-    Serial.println(targetModel);
-    Serial.print("Current Model: ");
-    Serial.println(DEVICE_MODEL);
-    Serial.print("Current Version: ");
-    Serial.println(FIRMWARE_VERSION);
-    Serial.print("New Version: ");
-    Serial.println(newVersion);
     Serial.print("Firmware URL: ");
     Serial.println(firmwareUrl);
 
-    // Check model
-    if (targetModel != DEVICE_MODEL)
+    if (firmwareUrl.length() == 0)
     {
-        Serial.println("OTA REJECTED: Firmware model mismatch.");
+        Serial.println("OTA REJECTED: Missing firmware URL.");
         Serial.println("==================================");
         return;
     }
 
-    // Check required information
-    if (firmwareUrl.length() == 0 || newVersion.length() == 0)
-    {
-        Serial.println("OTA REJECTED: Missing URL or version.");
-        Serial.println("==================================");
-        return;
-    }
-
-    // Prevent multiple OTA operations
     if (otaInProgress)
     {
         Serial.println("OTA already in progress.");
@@ -1186,13 +1164,13 @@ void messageHandler(char* topic, byte* payload, unsigned int length)
 
     otaInProgress = true;
 
-    // Perform OTA
-    performOTA(firmwareUrl, newVersion);
+    performOTA(firmwareUrl);
 
     otaInProgress = false;
 
     Serial.println("==================================");
     return;
+  }
 }
 
 const char* mqttStateMessage(int state)
@@ -1294,8 +1272,6 @@ void publishMessage() {
   JsonDocument doc;
   doc["NAME"] = "Airbuddi Max";
   doc["id"] = mac;
-  doc["model"] = DEVICE_MODEL;
-  doc["firmwareVersion"] = FIRMWARE_VERSION;
   doc["IAQ"] = IAQ;
   doc["Humidity"] = Humidity;
   doc["PM 2.5"] = PM25;
@@ -1658,7 +1634,7 @@ void printAwsNetworkDiagnostics()
 // HTTPS OTA FUNCTION
 // =====================================================
 
-void performOTA(String firmwareUrl, String newVersion)
+void performOTA(String firmwareUrl)
 {
     Serial.println();
     Serial.println("====================================");
@@ -1673,10 +1649,9 @@ void performOTA(String firmwareUrl, String newVersion)
 
     WiFiClientSecure otaClient;
 
-    // IMPORTANT:
-    // For the first development test only.
-    // We will replace this with proper certificate
-    // validation before production.
+    // Development testing only.
+    // We will add proper certificate validation
+    // before production deployment.
     otaClient.setInsecure();
 
     HTTPClient http;
@@ -1719,6 +1694,7 @@ void performOTA(String firmwareUrl, String newVersion)
     {
         Serial.print("OTA FAILED: Update.begin() failed. Error: ");
         Serial.println(Update.errorString());
+
         http.end();
         return;
     }
@@ -1737,6 +1713,7 @@ void performOTA(String firmwareUrl, String newVersion)
     if (written != (size_t)contentLength)
     {
         Serial.println("OTA FAILED: Firmware write incomplete.");
+
         Update.abort();
         http.end();
         return;
@@ -1746,6 +1723,7 @@ void performOTA(String firmwareUrl, String newVersion)
     {
         Serial.print("OTA FAILED: Update.end() failed. Error: ");
         Serial.println(Update.errorString());
+
         http.end();
         return;
     }
@@ -1753,14 +1731,13 @@ void performOTA(String firmwareUrl, String newVersion)
     if (!Update.isFinished())
     {
         Serial.println("OTA FAILED: Update not finished.");
+
         http.end();
         return;
     }
 
     Serial.println("====================================");
     Serial.println("OTA UPDATE SUCCESSFUL");
-    Serial.print("New firmware version: ");
-    Serial.println(newVersion);
     Serial.println("Restarting ESP32...");
     Serial.println("====================================");
 
