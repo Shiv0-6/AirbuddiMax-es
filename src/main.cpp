@@ -1,5 +1,3 @@
-//AirBuddi1
-//SPM1
 #include "bsec.h"
 #include <Wire.h>
 #include <HardwareSerial.h>
@@ -23,8 +21,7 @@
 // =====================================================
 
 #define DEVICE_MODEL "AIRBUDDI_MAX"
-#define FIRMWARE_VERSION "1.0.0"
-
+#define FIRMWARE_VERSION "1.0.1"
 
 #ifndef LED_BUILTIN
 #define LED_BUILTIN 2
@@ -56,7 +53,7 @@ bool connectAWS();
 bool syncTimeForTLS();
 void printAwsNetworkDiagnostics();
 const char* mqttStateMessage(int state);
-//void messageHandler(char* topic, byte* payload, unsigned int length);
+void messageHandler(char* topic, byte* payload, unsigned int length);
 void publishMessage();
 void publishStatus();
 void AWSTask(void *pvParameters);
@@ -297,6 +294,9 @@ void setup() {
   Serial.print("Control topic: ");
   Serial.println(AWS_IOT_SUBSCRIBE_TOPIC);
 
+  Serial.print("Firmware Version: ");
+  Serial.println(FIRMWARE_VERSION);
+
   //******************************************************************************-PIN DEFINITIONS-*****************************************************************************************
   pinMode(speed1, OUTPUT);                 //FAN PIN SET AS AN OUTPUT
   pinMode(speed2, OUTPUT);                 //FAN PIN SET AS AN OUTPUT
@@ -529,10 +529,12 @@ void displaycontrol(void *parameter) {
     memset(Buffer, 0, 9);
 
 
-    if (dwin.available()) {
-      for (int i = 0; i <= 8; i++) {
-        Buffer[i] = dwin.read();
-      }
+    if (dwin.available() >= 9)
+    {
+        for (int i = 0; i < 9; i++)
+        {
+            Buffer[i] = dwin.read();
+        }
     }
 
     switch (Buffer[5]) {
@@ -1088,25 +1090,37 @@ void reset(void) {
 
 void messageHandler(char* topic, byte* payload, unsigned int length)
 {
-    // Convert MQTT payload to String
-    String msg;
+    String mqttMsg;
 
     for (unsigned int i = 0; i < length; i++)
     {
-        msg += (char)payload[i];
+        mqttMsg += (char)payload[i];
     }
 
-    msg.trim();
+    mqttMsg.trim();
 
-    // Debug information
     Serial.println();
     Serial.println("===== MQTT MESSAGE RECEIVED =====");
     Serial.print("Topic: ");
     Serial.println(topic);
     Serial.print("Raw Payload: ");
-    Serial.println(msg);
+    Serial.println(mqttMsg);
 
-    // Check expected topic
+    Serial.println();
+    Serial.println("******** MQTT CALLBACK TRIGGERED ********");
+    Serial.print("Topic: ");
+    Serial.println(topic);
+    Serial.print("Payload: ");
+
+    for (unsigned int i = 0; i < length; i++)
+    {
+        Serial.print((char)payload[i]);
+    }
+
+    Serial.println();
+    Serial.println("*****************************************");
+
+    // Make sure message came on this device's control topic
     if (String(topic) != AWS_IOT_SUBSCRIBE_TOPIC)
     {
         Serial.println("Unexpected MQTT topic!");
@@ -1114,9 +1128,9 @@ void messageHandler(char* topic, byte* payload, unsigned int length)
         return;
     }
 
-    // Parse JSON
     JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, msg);
+
+    DeserializationError error = deserializeJson(doc, mqttMsg);
 
     if (error)
     {
@@ -1126,7 +1140,6 @@ void messageHandler(char* topic, byte* payload, unsigned int length)
         return;
     }
 
-    // Extract message
     String message = doc["message"] | "";
     message.trim();
 
@@ -1134,43 +1147,411 @@ void messageHandler(char* topic, byte* payload, unsigned int length)
     Serial.println(message);
 
 
+    // =========================================================
+    // HTTPS OTA UPDATE
+    // =========================================================
 
-// =====================================================
-// HTTPS OTA COMMAND
-// =====================================================
-if (message == "firmware_update")
-{
-    String firmwareUrl = doc["url"] | "";
-
-    firmwareUrl.trim();
-
-    Serial.println("===== FIRMWARE UPDATE REQUEST =====");
-    Serial.print("Firmware URL: ");
-    Serial.println(firmwareUrl);
-
-    if (firmwareUrl.length() == 0)
+    if (message == "firmware_update")
     {
-        Serial.println("OTA REJECTED: Missing firmware URL.");
+        String firmwareUrl = doc["url"] | "";
+        firmwareUrl.trim();
+
+        Serial.println("===== FIRMWARE UPDATE REQUEST =====");
+        Serial.print("Firmware URL: ");
+        Serial.println(firmwareUrl);
+
+        if (firmwareUrl.length() == 0)
+        {
+            Serial.println("OTA REJECTED: Missing firmware URL.");
+            Serial.println("==================================");
+            return;
+        }
+
+        if (otaInProgress)
+        {
+            Serial.println("OTA already in progress.");
+            Serial.println("==================================");
+            return;
+        }
+
+        otaInProgress = true;
+
+        performOTA(firmwareUrl);
+
+        otaInProgress = false;
+
         Serial.println("==================================");
         return;
     }
 
-    if (otaInProgress)
+
+    // =========================================================
+    // NORMAL DEVICE COMMANDS
+    // =========================================================
+
+    int command = 0;
+
+    if (message == "power_on")
+        command = 1;
+
+    else if (message == "power_off")
+        command = 2;
+
+    else if (message == "lower_on")
+        command = 3;
+
+    else if (message == "lower_off")
+        command = 4;
+
+    else if (message == "upper_on")
+        command = 5;
+
+    else if (message == "upper_off")
+        command = 6;
+
+    else if (message == "uvc_on")
+        command = 7;
+
+    else if (message == "uvc_off")
+        command = 8;
+
+    else if (message == "fan_1")
+        command = 9;
+
+    else if (message == "fan_2")
+        command = 10;
+
+    else if (message == "fan_3")
+        command = 11;
+
+    else if (message == "fan_off")
+        command = 12;
+
+    else if (message == "sleep_on")
+        command = 13;
+
+    else if (message == "sleep_off")
+        command = 14;
+
+    else if (message == "auto_on")
+        command = 15;
+
+    else if (message == "auto_off")
+        command = 16;
+
+
+    // =========================================================
+    // EXECUTE COMMAND
+    // =========================================================
+
+    switch (command)
     {
-        Serial.println("OTA already in progress.");
-        Serial.println("==================================");
-        return;
+        case 1:
+
+            // Manual command -> make sure auto mode does not
+            // immediately overwrite the GPIO state.
+            mine = 2;
+            autoMode = false;
+
+            p = 7;
+
+            dwin.write(S, 10);
+            dwin.write(L, 8);
+
+            Serial.println("Power ON command received");
+            Serial.print("p = ");
+            Serial.println(p);
+
+            break;
+
+
+        case 2:
+
+            p = 5;
+            mine = 2;
+            mod = 0;
+            text = 0;
+
+            powerState = false;
+            lowerChamberState = false;
+            upperChamberState = false;
+            autoMode = false;
+            sleepMode = false;
+            uvState = false;
+            fanSpeed = 0;
+
+            reset();
+
+            dwin.write(R, 10);
+            dwin.write(M, 8);
+
+            Serial.println("Power OFF command received");
+            Serial.print("p = ");
+            Serial.println(p);
+
+            break;
+
+
+        case 3:
+
+            mine = 2;
+            autoMode = false;
+
+            dwin.write(G, 8);
+
+            digitalWrite(LOWER_CHAMBER_PIN, HIGH);
+
+            lowerChamberState = true;
+
+            Serial.println("Lower chamber ON command received");
+
+            break;
+
+
+        case 4:
+
+            mine = 2;
+            autoMode = false;
+
+            dwin.write(H, 8);
+
+            digitalWrite(LOWER_CHAMBER_PIN, LOW);
+
+            lowerChamberState = false;
+
+            Serial.println("Lower chamber OFF command received");
+
+            break;
+
+
+        case 5:
+
+            mine = 2;
+            autoMode = false;
+
+            dwin.write(E, 8);
+
+            digitalWrite(UPPER_CHAMBER_PIN, HIGH);
+
+            upperChamberState = true;
+
+            Serial.println("Upper chamber ON command received");
+
+            break;
+
+
+        case 6:
+
+            mine = 2;
+            autoMode = false;
+
+            dwin.write(F, 8);
+
+            digitalWrite(UPPER_CHAMBER_PIN, LOW);
+
+            upperChamberState = false;
+
+            Serial.println("Upper chamber OFF command received");
+
+            break;
+
+
+        case 7:
+
+            mine = 2;
+            autoMode = false;
+
+            dwin.write(A, 8);
+
+            digitalWrite(UV_PROTECTION, HIGH);
+
+            uvState = true;
+
+            Serial.println("UV Protection ON command received");
+
+            break;
+
+
+        case 8:
+
+            mine = 2;
+            autoMode = false;
+
+            dwin.write(B, 8);
+
+            digitalWrite(UV_PROTECTION, LOW);
+
+            uvState = false;
+
+            Serial.println("UV Protection OFF command received");
+
+            break;
+
+
+        case 9:
+
+            mine = 2;
+            autoMode = false;
+
+            dwin.write(I, 8);
+
+            digitalWrite(speed1, LOW);
+            digitalWrite(speed2, HIGH);
+            digitalWrite(speed3, LOW);
+
+            fanSpeed = 1;
+
+            Serial.println("Fan Speed 1 command received");
+
+            break;
+
+
+        case 10:
+
+            mine = 2;
+            autoMode = false;
+
+            dwin.write(J, 8);
+
+            digitalWrite(speed1, HIGH);
+            digitalWrite(speed2, HIGH);
+            digitalWrite(speed3, LOW);
+
+            fanSpeed = 2;
+
+            Serial.println("Fan Speed 2 command received");
+
+            break;
+
+
+        case 11:
+
+            mine = 2;
+            autoMode = false;
+
+            dwin.write(K, 8);
+
+            digitalWrite(speed1, LOW);
+            digitalWrite(speed2, LOW);
+            digitalWrite(speed3, HIGH);
+
+            fanSpeed = 3;
+
+            Serial.println("Fan Speed 3 command received");
+
+            break;
+
+
+        case 12:
+
+            mine = 2;
+            autoMode = false;
+
+            dwin.write(W, 8);
+
+            digitalWrite(speed1, LOW);
+            digitalWrite(speed2, LOW);
+            digitalWrite(speed3, LOW);
+
+            fanSpeed = 0;
+
+            Serial.println("Fan OFF command received");
+
+            break;
+
+
+        case 13:
+
+            mine = 2;
+            autoMode = false;
+
+            p = 5;
+
+            sleepMode = true;
+
+            dwin.write(T, 10);
+            dwin.write(C, 8);
+
+            digitalWrite(speed1, LOW);
+            digitalWrite(speed2, HIGH);
+            digitalWrite(speed3, LOW);
+
+            digitalWrite(UPPER_CHAMBER_PIN, HIGH);
+            digitalWrite(LOWER_CHAMBER_PIN, LOW);
+            digitalWrite(UV_PROTECTION, LOW);
+
+            sl1 = 2;
+            sl2 = 2;
+
+            Serial.println("Sleep Mode ON command received");
+
+            break;
+
+
+        case 14:
+
+            p = 7;
+
+            sleepMode = false;
+
+            sl1 = 0;
+            sl2 = 0;
+
+            dwin.write(U, 10);
+            dwin.write(D, 8);
+
+            reset();
+
+            Serial.println("Sleep Mode OFF command received");
+
+            break;
+
+
+        case 15:
+
+            mine = 1;
+            autoMode = true;
+            sleepMode = false;
+
+            dwin.write(X, 8);
+
+            Serial.println("Auto Mode ON command received");
+
+            break;
+
+
+        case 16:
+
+            mine = 2;
+            autoMode = false;
+
+            /*
+             * Keep the existing current hardware state when
+             * leaving auto mode.
+             *
+             * We are deliberately not reproducing the old
+             * long auto-off logic here yet. First we restore
+             * reliable MQTT manual control.
+             */
+
+            delay(200);
+
+            dwin.write(Y, 8);
+
+            Serial.println("Auto Mode OFF command received");
+
+            break;
+
+
+        default:
+
+            Serial.print("Unknown command received: ");
+            Serial.println(message);
+
+            break;
     }
 
-    otaInProgress = true;
-
-    performOTA(firmwareUrl);
-
-    otaInProgress = false;
-
-    Serial.println("==================================");
-    return;
-  }
+    Serial.println("=================================");
 }
 
 const char* mqttStateMessage(int state)
@@ -1245,12 +1626,16 @@ bool connectAWS()
             Serial.println("AWS IoT Connected!");
             publishStatus();
 
-            // Subscribe again after every reconnect
             if (client.subscribe(AWS_IOT_SUBSCRIBE_TOPIC.c_str()))
-                Serial.println("AWS IoT subscribe OK");
+            {
+                Serial.println("MQTT SUBSCRIBE OK");
+                Serial.print("Subscribed topic: ");
+                Serial.println(AWS_IOT_SUBSCRIBE_TOPIC);
+            }
             else
-                Serial.println("AWS IoT subscribe failed");
-
+            {
+                Serial.println("MQTT SUBSCRIBE FAILED");
+            }
             return true;
         }
 
@@ -1495,7 +1880,7 @@ void AWSTask(void *pvParameters)
 
     client.setServer(AWS_IOT_ENDPOINT, 8883);
     client.setCallback(messageHandler);
-    client.setBufferSize(1024);
+    client.setBufferSize(8192);
     client.setKeepAlive(60);
     client.setSocketTimeout(15);
 
@@ -1633,7 +2018,6 @@ void printAwsNetworkDiagnostics()
 // =====================================================
 // HTTPS OTA FUNCTION
 // =====================================================
-
 void performOTA(String firmwareUrl)
 {
     Serial.println();
@@ -1649,19 +2033,21 @@ void performOTA(String firmwareUrl)
 
     WiFiClientSecure otaClient;
 
-    // Development testing only.
-    // We will add proper certificate validation
-    // before production deployment.
+    // Development testing only
     otaClient.setInsecure();
 
     HTTPClient http;
+
+    http.setTimeout(30000);
 
     Serial.println("Connecting to firmware server...");
     Serial.println(firmwareUrl);
 
     if (!http.begin(otaClient, firmwareUrl))
     {
-        Serial.println("OTA FAILED: HTTP connection could not start.");
+        Serial.println("OTA FAILED: HTTP begin failed.");
+        Serial.print("URL length: ");
+        Serial.println(firmwareUrl.length());
         return;
     }
 
@@ -1672,7 +2058,9 @@ void performOTA(String firmwareUrl)
 
     if (httpCode != HTTP_CODE_OK)
     {
-        Serial.println("OTA FAILED: Firmware download failed.");
+        Serial.print("OTA FAILED: HTTP error = ");
+        Serial.println(httpCode);
+
         http.end();
         return;
     }
@@ -1685,34 +2073,97 @@ void performOTA(String firmwareUrl)
 
     if (contentLength <= 0)
     {
-        Serial.println("OTA FAILED: Invalid firmware size.");
+        Serial.println("OTA FAILED: Invalid Content-Length.");
         http.end();
         return;
     }
 
     if (!Update.begin(contentLength))
     {
-        Serial.print("OTA FAILED: Update.begin() failed. Error: ");
+        Serial.print("OTA FAILED: Update.begin() failed: ");
         Serial.println(Update.errorString());
 
         http.end();
         return;
     }
 
-    Serial.println("Starting firmware update...");
+    Serial.println("OTA partition ready.");
+    Serial.println("Downloading firmware...");
 
     WiFiClient *stream = http.getStreamPtr();
 
-    size_t written = Update.writeStream(*stream);
+    uint8_t buffer[1024];
 
-    Serial.print("Bytes written: ");
-    Serial.print(written);
-    Serial.print(" / ");
-    Serial.println(contentLength);
+    size_t totalWritten = 0;
+    unsigned long lastProgress = millis();
 
-    if (written != (size_t)contentLength)
+    while (totalWritten < (size_t)contentLength)
     {
-        Serial.println("OTA FAILED: Firmware write incomplete.");
+        size_t availableBytes = stream->available();
+
+        if (availableBytes)
+        {
+            size_t bytesToRead = availableBytes;
+
+            if (bytesToRead > sizeof(buffer))
+                bytesToRead = sizeof(buffer);
+
+            int bytesRead = stream->readBytes(buffer, bytesToRead);
+
+            if (bytesRead > 0)
+            {
+                size_t written = Update.write(buffer, bytesRead);
+
+                if (written != (size_t)bytesRead)
+                {
+                    Serial.println();
+                    Serial.println("OTA FAILED: Flash write error.");
+
+                    Update.abort();
+                    http.end();
+                    return;
+                }
+
+                totalWritten += written;
+            }
+        }
+
+        // Timeout protection
+        if (millis() - lastProgress > 15000)
+        {
+            Serial.println();
+            Serial.println("OTA FAILED: Download timeout.");
+
+            Update.abort();
+            http.end();
+            return;
+        }
+
+        if (millis() - lastProgress > 1000)
+        {
+            int percent =
+                (totalWritten * 100) / contentLength;
+
+            Serial.print("OTA Progress: ");
+            Serial.print(percent);
+            Serial.print("% (");
+            Serial.print(totalWritten);
+            Serial.print("/");
+            Serial.print(contentLength);
+            Serial.println(")");
+
+            lastProgress = millis();
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    Serial.println();
+    Serial.println("Firmware download complete.");
+
+    if (totalWritten != (size_t)contentLength)
+    {
+        Serial.println("OTA FAILED: Size mismatch.");
 
         Update.abort();
         http.end();
@@ -1721,7 +2172,7 @@ void performOTA(String firmwareUrl)
 
     if (!Update.end())
     {
-        Serial.print("OTA FAILED: Update.end() failed. Error: ");
+        Serial.print("OTA FAILED: Update.end() failed: ");
         Serial.println(Update.errorString());
 
         http.end();
@@ -1736,10 +2187,11 @@ void performOTA(String firmwareUrl)
         return;
     }
 
+    Serial.println();
     Serial.println("====================================");
-    Serial.println("OTA UPDATE SUCCESSFUL");
+    Serial.println("       OTA UPDATE SUCCESSFUL");
+    Serial.println("====================================");
     Serial.println("Restarting ESP32...");
-    Serial.println("====================================");
 
     http.end();
 
