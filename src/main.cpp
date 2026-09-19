@@ -21,7 +21,7 @@
 // =====================================================
 
 #define DEVICE_MODEL "AIRBUDDI_MAX"
-#define FIRMWARE_VERSION "1.0.1"
+#define FIRMWARE_VERSION "1.0.0"
 
 #ifndef LED_BUILTIN
 #define LED_BUILTIN 2
@@ -30,9 +30,20 @@
 // =====================================================
 // HTTPS OTA
 // =====================================================
-bool otaInProgress = false;
-void performOTA(String firmwareUrl);
 
+volatile bool otaInProgress = false;
+volatile bool otaRequested = false;
+
+String otaFirmwareUrl = "";
+
+TaskHandle_t otaTaskHandle = NULL;
+
+// OTA task gets higher priority than normal application tasks
+#define OTA_TASK_PRIORITY 5
+#define OTA_TASK_STACK_SIZE 12288
+
+void performOTA(String firmwareUrl);
+void otaTask(void *pvParameters);
 
 // ===================== AWS IoT =====================
 
@@ -43,9 +54,6 @@ String AWS_IOT_STATUS_TOPIC;
 String mac = "";
 int connectedFlag = 0;
 String getDefaultMacAddress();
-
-
-
 WiFiClientSecure net = WiFiClientSecure();
 PubSubClient client(net);
 
@@ -271,6 +279,130 @@ volatile bool builtinLedRunning = true;
 volatile bool led12Running = false;
 //XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX-END-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 
+// =====================================================
+// OTA TASK CONTROL
+// =====================================================
+
+void stopNormalTasksForOTA()
+{
+    Serial.println();
+    Serial.println("====================================");
+    Serial.println("      PREPARING DEVICE FOR OTA");
+    Serial.println("====================================");
+
+    // Stop normal application tasks.
+    // OTA task itself is NOT suspended.
+
+    if (controltaskhandle != NULL)
+    {
+        vTaskSuspend(controltaskhandle);
+    }
+
+    if (ledlighttaskhandle != NULL)
+    {
+        vTaskSuspend(ledlighttaskhandle);
+    }
+
+    if (displayTaskHandle != NULL)
+    {
+        vTaskSuspend(displayTaskHandle);
+    }
+
+    if (SoilMoisture_1_Handle != NULL)
+    {
+        vTaskSuspend(SoilMoisture_1_Handle);
+    }
+
+    if (SoilMoisture_2_Handle != NULL)
+    {
+        vTaskSuspend(SoilMoisture_2_Handle);
+    }
+
+    if (bmeTaskHandle != NULL)
+    {
+        vTaskSuspend(bmeTaskHandle);
+    }
+
+    if (hpmaTaskHandle != NULL)
+    {
+        vTaskSuspend(hpmaTaskHandle);
+    }
+
+    Serial.println("Normal application tasks suspended.");
+}
+
+void prepareHardwareForOTA()
+{
+    Serial.println("Turning OFF device outputs...");
+
+    // Fans OFF
+    digitalWrite(speed1, LOW);
+    digitalWrite(speed2, LOW);
+    digitalWrite(speed3, LOW);
+
+    // UV OFF
+    digitalWrite(UV_PROTECTION, LOW);
+
+    // Upper / lower chamber OFF
+    digitalWrite(UPPER_CHAMBER_PIN, LOW);
+    digitalWrite(LOWER_CHAMBER_PIN, LOW);
+
+    // Water sprinklers OFF
+    digitalWrite(Watersprinkler1, LOW);
+    digitalWrite(Watersprinkler2, LOW);
+
+    Serial.println("Device outputs are OFF.");
+}
+
+void otaTask(void *pvParameters)
+{
+    Serial.println();
+    Serial.println("====================================");
+    Serial.println("       OTA TASK STARTED");
+    Serial.println("====================================");
+
+    while (true)
+    {
+        if (otaRequested && !otaInProgress)
+        {
+            otaRequested = false;
+            otaInProgress = true;
+
+            Serial.println();
+            Serial.println("====================================");
+            Serial.println("       OTA REQUEST ACCEPTED");
+            Serial.println("====================================");
+
+            // Stop all normal device operation
+            stopNormalTasksForOTA();
+
+            // Put hardware into safe state
+            prepareHardwareForOTA();
+
+            // Small delay to make sure everything has stopped
+            vTaskDelay(pdMS_TO_TICKS(500));
+
+            String url = otaFirmwareUrl;
+
+            if (url.length() == 0)
+            {
+                Serial.println("OTA FAILED: Empty firmware URL.");
+                otaInProgress = false;
+                continue;
+            }
+
+            // Start actual OTA
+            performOTA(url);
+
+            // Normally performOTA() restarts the ESP32
+            // if successful.
+            otaInProgress = false;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
 //*****************************************************************************-SETUP-**************************************************************************************************
 void setup() {
   Serial.begin(115200);
@@ -327,6 +459,8 @@ void setup() {
   xTaskCreate(WifiManagerTask, "WifiManager Task", 4096, NULL, 1, &WifiManagerTaskHandle);  
   xTaskCreate(bmeTask, "BME Task", 8192, NULL, 1, &bmeTaskHandle);                      //TASK CREATED FOR BME
   xTaskCreate(hpmaTask, "HPMA Task", 8192, NULL, 1, &hpmaTaskHandle);                   //TASK CREATED FOR HPMA
+  // HIGH PRIORITY OTA TASK
+  xTaskCreate(otaTask, "OTA Task", OTA_TASK_STACK_SIZE, NULL, OTA_TASK_PRIORITY, &otaTaskHandle);
 }
 //XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX-END-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 void loop() {}
@@ -1151,39 +1285,78 @@ void messageHandler(char* topic, byte* payload, unsigned int length)
     // HTTPS OTA UPDATE
     // =========================================================
 
-    if (message == "firmware_update")
+if (message == "firmware_update")
+{
+    Serial.println("===== FIRMWARE UPDATE REQUEST =====");
+
+    String firmwareUrl = doc["url"] | "";
+    firmwareUrl.trim();
+
+    if (firmwareUrl.length() == 0)
     {
-        String firmwareUrl = doc["url"] | "";
-        firmwareUrl.trim();
-
-        Serial.println("===== FIRMWARE UPDATE REQUEST =====");
-        Serial.print("Firmware URL: ");
-        Serial.println(firmwareUrl);
-
-        if (firmwareUrl.length() == 0)
-        {
-            Serial.println("OTA REJECTED: Missing firmware URL.");
-            Serial.println("==================================");
-            return;
-        }
-
-        if (otaInProgress)
-        {
-            Serial.println("OTA already in progress.");
-            Serial.println("==================================");
-            return;
-        }
-
-        otaInProgress = true;
-
-        performOTA(firmwareUrl);
-
-        otaInProgress = false;
-
+        Serial.println("OTA REJECTED: Missing firmware URL.");
         Serial.println("==================================");
         return;
     }
 
+    // Do not accept another OTA request while one is active
+    if (otaInProgress || otaRequested)
+    {
+        Serial.println("OTA REJECTED: OTA already active.");
+        Serial.println("==================================");
+        return;
+    }
+
+    // Optional model validation
+    String requestedModel = doc["model"] | "";
+
+    if (requestedModel.length() > 0)
+    {
+        requestedModel.trim();
+
+        if (requestedModel != DEVICE_MODEL)
+        {
+            Serial.println("OTA REJECTED: Firmware model mismatch.");
+            Serial.print("Device model: ");
+            Serial.println(DEVICE_MODEL);
+            Serial.print("Requested model: ");
+            Serial.println(requestedModel);
+            Serial.println("==================================");
+            return;
+        }
+    }
+
+    // Optional version information
+    String requestedVersion = doc["version"] | "";
+
+    Serial.println("OTA request accepted.");
+
+    Serial.print("Device model: ");
+    Serial.println(DEVICE_MODEL);
+
+    Serial.print("Current firmware: ");
+    Serial.println(FIRMWARE_VERSION);
+
+    if (requestedVersion.length() > 0)
+    {
+        Serial.print("Requested firmware: ");
+        Serial.println(requestedVersion);
+    }
+
+    Serial.print("Firmware URL length: ");
+    Serial.println(firmwareUrl.length());
+
+    // Store URL for high-priority OTA task
+    otaFirmwareUrl = firmwareUrl;
+
+    // Tell OTA task to start
+    otaRequested = true;
+
+    Serial.println("OTA task notified.");
+    Serial.println("==================================");
+
+    return;
+}
 
     // =========================================================
     // NORMAL DEVICE COMMANDS
@@ -1880,7 +2053,7 @@ void AWSTask(void *pvParameters)
 
     client.setServer(AWS_IOT_ENDPOINT, 8883);
     client.setCallback(messageHandler);
-    client.setBufferSize(8192);
+    client.setBufferSize(16384);
     client.setKeepAlive(60);
     client.setSocketTimeout(15);
 
@@ -1903,8 +2076,14 @@ void AWSTask(void *pvParameters)
 
     while (true)
     {
-        // Process incoming MQTT data FIRST (keepalive, SUBACK, etc.)
-        client.loop();
+      // OTA has priority over normal MQTT/application work.
+      if (otaInProgress || otaRequested)
+      {
+          vTaskDelay(pdMS_TO_TICKS(100));
+          continue;
+      }
+      // Process incoming MQTT data FIRST (keepalive, SUBACK, etc.)
+      client.loop();
 
         // Then check connection status
         if (!client.connected())
@@ -2025,146 +2204,128 @@ void performOTA(String firmwareUrl)
     Serial.println("        AIRBUDDI HTTPS OTA");
     Serial.println("====================================");
 
-    if (WiFi.status() != WL_CONNECTED)
-    {
-        Serial.println("OTA FAILED: WiFi not connected.");
-        return;
-    }
+    Serial.printf("Free heap before OTA: %u bytes\n", ESP.getFreeHeap());
+    Serial.printf("Largest free block: %u bytes\n", ESP.getMaxAllocHeap());
 
+    // Stop MQTT communication during OTA
+    client.disconnect();
+
+    // Give memory/time for cleanup
+    delay(500);
+
+    Serial.printf("Free heap after MQTT disconnect: %u bytes\n", ESP.getFreeHeap());
+    Serial.printf("Largest free block: %u bytes\n", ESP.getMaxAllocHeap());
+    Serial.printf("Free heap before TLS: %u bytes\n", ESP.getFreeHeap());
+    Serial.printf("Largest free block before TLS: %u bytes\n", ESP.getMaxAllocHeap());
     WiFiClientSecure otaClient;
 
-    // Development testing only
+    // DEVELOPMENT ONLY
     otaClient.setInsecure();
 
     HTTPClient http;
 
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
     http.setTimeout(30000);
 
     Serial.println("Connecting to firmware server...");
-    Serial.println(firmwareUrl);
 
     if (!http.begin(otaClient, firmwareUrl))
     {
-        Serial.println("OTA FAILED: HTTP begin failed.");
-        Serial.print("URL length: ");
-        Serial.println(firmwareUrl.length());
+        Serial.println("OTA FAILED: HTTP begin failed");
         return;
     }
 
     int httpCode = http.GET();
 
-    Serial.print("HTTP response: ");
-    Serial.println(httpCode);
+    Serial.printf("HTTP response: %d\n", httpCode);
 
     if (httpCode != HTTP_CODE_OK)
     {
-        Serial.print("OTA FAILED: HTTP error = ");
-        Serial.println(httpCode);
-
+        Serial.printf("OTA FAILED: HTTP error = %d\n", httpCode);
         http.end();
         return;
     }
 
     int contentLength = http.getSize();
 
-    Serial.print("Firmware size: ");
-    Serial.print(contentLength);
-    Serial.println(" bytes");
+    Serial.printf("Firmware size: %d bytes\n", contentLength);
 
     if (contentLength <= 0)
     {
-        Serial.println("OTA FAILED: Invalid Content-Length.");
+        Serial.println("OTA FAILED: Invalid firmware size");
         http.end();
         return;
     }
 
     if (!Update.begin(contentLength))
     {
-        Serial.print("OTA FAILED: Update.begin() failed: ");
-        Serial.println(Update.errorString());
+        Serial.printf(
+            "OTA FAILED: Update.begin error: %s\n",
+            Update.errorString()
+        );
 
         http.end();
         return;
     }
 
-    Serial.println("OTA partition ready.");
-    Serial.println("Downloading firmware...");
-
     WiFiClient *stream = http.getStreamPtr();
 
     uint8_t buffer[1024];
 
-    size_t totalWritten = 0;
-    unsigned long lastProgress = millis();
+    size_t written = 0;
+    unsigned long lastDataTime = millis();
 
-    while (totalWritten < (size_t)contentLength)
+    while (http.connected() && written < (size_t)contentLength)
     {
-        size_t availableBytes = stream->available();
+        size_t available = stream->available();
 
-        if (availableBytes)
+        if (available)
         {
-            size_t bytesToRead = availableBytes;
+            size_t readSize = available;
 
-            if (bytesToRead > sizeof(buffer))
-                bytesToRead = sizeof(buffer);
+            if (readSize > sizeof(buffer))
+                readSize = sizeof(buffer);
 
-            int bytesRead = stream->readBytes(buffer, bytesToRead);
+            int bytesRead = stream->readBytes(buffer, readSize);
 
             if (bytesRead > 0)
             {
-                size_t written = Update.write(buffer, bytesRead);
+                size_t bytesWritten = Update.write(buffer, bytesRead);
 
-                if (written != (size_t)bytesRead)
+                if (bytesWritten != (size_t)bytesRead)
                 {
-                    Serial.println();
-                    Serial.println("OTA FAILED: Flash write error.");
-
+                    Serial.println("OTA FAILED: Flash write error");
                     Update.abort();
                     http.end();
                     return;
                 }
 
-                totalWritten += written;
+                written += bytesWritten;
+                lastDataTime = millis();
+
+                Serial.printf(
+                    "OTA progress: %u / %u bytes (%u%%)\n",
+                    (unsigned)written,
+                    (unsigned)contentLength,
+                    (unsigned)((written * 100) / contentLength)
+                );
             }
         }
 
-        // Timeout protection
-        if (millis() - lastProgress > 15000)
+        if (millis() - lastDataTime > 15000)
         {
-            Serial.println();
-            Serial.println("OTA FAILED: Download timeout.");
-
+            Serial.println("OTA FAILED: Download timeout");
             Update.abort();
             http.end();
             return;
         }
 
-        if (millis() - lastProgress > 1000)
-        {
-            int percent =
-                (totalWritten * 100) / contentLength;
-
-            Serial.print("OTA Progress: ");
-            Serial.print(percent);
-            Serial.print("% (");
-            Serial.print(totalWritten);
-            Serial.print("/");
-            Serial.print(contentLength);
-            Serial.println(")");
-
-            lastProgress = millis();
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(1));
+        delay(1);
     }
 
-    Serial.println();
-    Serial.println("Firmware download complete.");
-
-    if (totalWritten != (size_t)contentLength)
+    if (written != (size_t)contentLength)
     {
-        Serial.println("OTA FAILED: Size mismatch.");
-
+        Serial.println("OTA FAILED: Incomplete firmware download");
         Update.abort();
         http.end();
         return;
@@ -2172,8 +2333,10 @@ void performOTA(String firmwareUrl)
 
     if (!Update.end())
     {
-        Serial.print("OTA FAILED: Update.end() failed: ");
-        Serial.println(Update.errorString());
+        Serial.printf(
+            "OTA FAILED: Update.end error: %s\n",
+            Update.errorString()
+        );
 
         http.end();
         return;
@@ -2181,8 +2344,7 @@ void performOTA(String firmwareUrl)
 
     if (!Update.isFinished())
     {
-        Serial.println("OTA FAILED: Update not finished.");
-
+        Serial.println("OTA FAILED: Update not finished");
         http.end();
         return;
     }
@@ -2191,7 +2353,6 @@ void performOTA(String firmwareUrl)
     Serial.println("====================================");
     Serial.println("       OTA UPDATE SUCCESSFUL");
     Serial.println("====================================");
-    Serial.println("Restarting ESP32...");
 
     http.end();
 
