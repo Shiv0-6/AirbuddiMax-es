@@ -25,7 +25,7 @@
 // =====================================================
 
 #define DEVICE_MODEL    "Monitor"
-#define FIRMWARE_VERSION "1.0.1"
+#define FIRMWARE_VERSION "1.0.0"
 
 #ifndef LED_BUILTIN
 #define LED_BUILTIN 2
